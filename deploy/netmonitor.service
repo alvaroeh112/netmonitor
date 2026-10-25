@@ -1,0 +1,32 @@
+[Unit]
+Description=NetMonitor - monitor de conexion a internet con bot de Telegram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=netmonitor
+Group=netmonitor
+WorkingDirectory=/opt/netmonitor
+Environment=NETMONITOR_ENV=/etc/netmonitor/netmonitor.env
+Environment=PYTHONUNBUFFERED=1
+Environment=MPLCONFIGDIR=/var/lib/netmonitor/mpl
+ExecStart=/opt/netmonitor/.venv/bin/python -m netmonitor
+Restart=always
+RestartSec=10
+# Base de datos en /var/lib/netmonitor (la crea y le da permisos systemd)
+StateDirectory=netmonitor
+# ping y mtr necesitan sockets ICMP en bruto
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+# No debe degradar a la Raspberry ni a los otros servicios
+Nice=5
+MemoryMax=400M
+CPUQuota=60%
+
+[Install]
+WantedBy=multi-user.target
