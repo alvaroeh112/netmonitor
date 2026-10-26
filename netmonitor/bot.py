@@ -103,7 +103,7 @@ class BotApp:
         await self.say(ctx, msg.AYUDA, kb([("📊 Estado", "est"), ("📈 Resumen", "res:24h")], [("🔴 Caídas", "cai:7d"), ("⚡ Test", "tst")]))
 
     async def cmd_estado(self, update, ctx):
-        st = await asyncio.to_thread(stats.latest_status, self.db)
+        st = await asyncio.to_thread(stats.latest_status, self.db, None, tuple(self.cfg.dns_public))
         await self.say(ctx, msg.estado(st, self.cfg.tz), kb([("📊 Resumen 24h", "res:24h"), ("🔴 Ver caídas", "cai:7d")], [("⚡ Test ahora", "tst")]))
 
     def _period(self, ctx, default="24h") -> tuple[str, int]:

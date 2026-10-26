@@ -1,6 +1,6 @@
 import pytest
 
-from netmonitor.outage import (OK, ROUTER, SIN_ENLACE, SIN_INTERNET, SOLO_DNS, AlertGate, Incident, OutageTracker,
+from netmonitor.outage import (OK, ROUTER, SIN_ENLACE, SIN_INTERNET, SOLO_DNS, WEB, AlertGate, Incident, OutageTracker,
                                classify)
 
 
@@ -16,6 +16,12 @@ from netmonitor.outage import (OK, ROUTER, SIN_ENLACE, SIN_INTERNET, SOLO_DNS, A
 ])
 def test_classify(link, gw, net, dns, expected):
     assert classify(link, gw, net, dns) == expected
+
+
+def test_classify_web_failure_only_when_everything_else_is_fine():
+    assert classify(True, True, True, True, web_ok=False) == WEB
+    assert classify(True, True, True, False, web_ok=False) == SOLO_DNS      # el DNS explica que no carguen
+    assert classify(True, True, False, True, web_ok=False) == SIN_INTERNET
 
 
 def feed(tr, states, start=1000, step=30):
@@ -45,11 +51,20 @@ def test_single_ok_does_not_close():
     assert [k for _, k, *_ in ev] == ["start", "end"]
 
 
-def test_type_escalates_to_most_severe():
+def test_brief_other_type_does_not_change_incident():
     tr = OutageTracker(2, 1)
     ev = feed(tr, [SOLO_DNS, SOLO_DNS, SIN_INTERNET, SIN_ENLACE, OK])
-    assert [k for _, k, *_ in ev] == ["start", "update", "update", "end"]
-    assert ev[-1][4] == SIN_ENLACE
+    assert [k for _, k, *_ in ev] == ["start", "end"]
+    assert ev[-1][4] == SOLO_DNS
+
+
+def test_sustained_type_change_splits_incident_without_gap():
+    tr = OutageTracker(2, 2)
+    ev = feed(tr, [ROUTER, ROUTER, SOLO_DNS, SOLO_DNS, SOLO_DNS, OK, OK])
+    assert [(k, ty) for _, k, _, _, ty in ev] == [("start", ROUTER), ("end", ROUTER), ("start", SOLO_DNS), ("end", SOLO_DNS)]
+    router_end, dns_start = ev[1][3], ev[2][2]
+    assert router_end == dns_start == 1000 + 2 * 30                 # el segundo empieza donde acaba el primero
+    assert ev[3][3] == 1000 + 5 * 30
 
 
 def test_start_type_is_worst_in_streak():

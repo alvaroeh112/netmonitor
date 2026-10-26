@@ -27,11 +27,13 @@ class Scenario:
         return self.steps[min(self.i, len(self.steps) - 1)][0]
 
     async def measure(self, carrier_unused):
-        carrier, gw, net, dns = self.steps[min(self.i, len(self.steps) - 1)]
+        step = self.steps[min(self.i, len(self.steps) - 1)]
+        carrier, gw, net, dns = step[:4]
+        web = step[4] if len(step) > 4 else net
         self.i += 1
         net_res = {"1.1.1.1": good() if net else dead(), "8.8.8.8": good() if net else dead()}
-        return (good() if gw else dead(), net_res, [("gw", "google.com", 10.0 if dns else None, dns)],
-                [("https://x", 50.0 if net else None, 204 if net else None, net)])
+        return (good() if gw else dead(), net_res, [("gw", "google.com", 10.0 if dns else None, dns), ("1.1.1.1", "google.com", 20.0, True)],
+                [("https://x", 50.0 if web else None, 204 if web else None, web)])
 
 
 @pytest.fixture
@@ -143,3 +145,22 @@ async def test_restart_closes_stale_incident_and_resumes_recent(db, make):
     row = db.one("SELECT * FROM incidents")
     assert row["end_ts"] == old                              # cerrada en la última medición conocida
     assert m.tracker.current is None
+
+
+async def test_only_public_dns_working_counts_as_dns_outage(make, db):
+    """El caso real: 1.1.1.1 resuelve pero el DNS de casa no -> el usuario no puede navegar -> es una caída."""
+    build, sent, _ = make
+    steps = [OKS] + [(True, True, True, False)] * 3 + [OKS] * 3
+    m, _ = build(steps)
+    await run_n(m, len(steps), 1_800_000_000)
+    inc = db.query("SELECT type FROM incidents")
+    assert [r["type"] for r in inc] == ["solo_dns"]
+
+
+async def test_all_webs_failing_is_an_outage_even_if_pings_and_dns_work(make, db):
+    build, sent, _ = make
+    steps = [OKS] + [(True, True, True, True, False)] * 3 + [OKS] * 3
+    m, _ = build(steps)
+    await run_n(m, len(steps), 1_800_000_000)
+    assert [r["type"] for r in db.query("SELECT type FROM incidents")] == ["web_caida"]
+    assert any("webs no cargan" in t for t in sent)

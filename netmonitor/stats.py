@@ -148,7 +148,7 @@ def worst_hours(profile: list[dict], top: int = 3) -> list[dict]:
     return sorted(bad, key=lambda p: -(p["lat"] or 0))[:top]
 
 
-def latest_status(db: Database, now: int | None = None) -> dict:
+def latest_status(db: Database, now: int | None = None, public_dns: tuple[str, ...] = ()) -> dict:
     """Datos para /estado: último ciclo, últimas medidas y caída actual."""
     now = now or int(time.time())
     cyc = db.one("SELECT * FROM cycles ORDER BY ts DESC LIMIT 1")
@@ -159,8 +159,12 @@ def latest_status(db: Database, now: int | None = None) -> dict:
     spd = db.one("SELECT * FROM speed WHERE ok=1 ORDER BY ts DESC LIMIT 1")
     inc = db.one("SELECT * FROM incidents WHERE end_ts IS NULL ORDER BY start_ts DESC LIMIT 1")
     web = db.one("SELECT COUNT(*) n, SUM(ok) o FROM http WHERE ts=?", (cyc["ts"],)) if cyc else None
+    dns_rows = db.query("SELECT resolver, ok FROM dns WHERE ts=?", (cyc["ts"],)) if cyc else []
+    home = [r["ok"] for r in dns_rows if r["resolver"] not in public_dns] or [r["ok"] for r in dns_rows]
     since = now - 3600
     h1 = db.one("SELECT COUNT(*) n, SUM(state!='ok') b FROM cycles WHERE ts>=?", (since,))
     return {"cycle": cyc, "gw": gw, "net": net, "sys": sysi, "link": link, "speed": spd, "open_incident": inc,
             "web_all_failed": bool(web and web["n"] and not web["o"]),
+            "web_ok": (web["o"] or 0) if web else 0, "web_n": web["n"] if web else 0,
+            "dns_ok": sum(home), "dns_n": len(home),
             "bad_last_hour": (h1["b"] or 0) if h1 else 0, "n_last_hour": h1["n"] if h1 else 0, "now": now}

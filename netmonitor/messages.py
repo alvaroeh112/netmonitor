@@ -55,6 +55,11 @@ def outage_end(inc, tz: ZoneInfo) -> str:
             f"({fmt_dt(inc.start_ts, tz, False)} → {fmt_dt(inc.end_ts, tz, False)}).\nTipo: {LABELS[inc.type]}")
 
 
+def outage_changed(inc, tz: ZoneInfo) -> str:
+    return (f"🔄 La caída sigue, pero ahora el problema es otro:\n{LABELS[inc.type]} "
+            f"(desde las {fmt_dt(inc.start_ts, tz, False)}).")
+
+
 def flapping(count: int) -> str:
     return (f"🟠 Conexión inestable: {count} cortes en pocos minutos.\n"
             "Dejo de avisar uno a uno y te escribo cuando se estabilice.")
@@ -96,7 +101,8 @@ def estado(st: dict, tz: ZoneInfo) -> str:
     loss = sum(r["loss"] for r in st["net"]) / len(st["net"]) if st["net"] else None
     gw = st["gw"]
     lines = [f"{emoji} {title}"]
-    lines.append(f"📡 Internet: {num(lat, 0, 'ms')} · pérdida {num(loss, 0, '%')} · router {num(gw['rtt_avg'] if gw else None, 1, 'ms')}")
+    lines.append(f"📡 Internet: {num(lat, 0, 'ms')} · pérdida {num(loss, 0, '%')} · router {num(gw['rtt_avg'] if gw else None, 1, 'ms')}"
+                 f" · DNS {st.get('dns_ok', 0)}/{st.get('dns_n', 0)} · webs {st.get('web_ok', 0)}/{st.get('web_n', 0)}")
     sp = st["speed"]
     lines.append(f"⚡ Velocidad: ⬇ {num(sp['down_mbps'], 0, 'Mbps')} ⬆ {num(sp['up_mbps'], 0, 'Mbps')} ({fmt_ago(sp['ts'], now)})"
                  if sp else "⚡ Velocidad: aún sin test (usa /test)")

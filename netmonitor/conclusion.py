@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from .messages import fmt_dur, num
-from .outage import LABELS, ROUTER, SIN_ENLACE, SIN_INTERNET, SOLO_DNS
+from .outage import LABELS, ROUTER, SIN_ENLACE, SIN_INTERNET, SOLO_DNS, WEB
 
 CAUSE_TEXT = {
     ROUTER: ("Las caídas coinciden con el router inalcanzable: el equipo de medida deja de ver al router. "
@@ -11,7 +11,9 @@ CAUSE_TEXT = {
                    "es decir, en la línea o en la red del operador. Es motivo para abrir una incidencia con el operador."),
     SIN_ENLACE: ("Las caídas coinciden con la pérdida del enlace Ethernet: apunta al cable, a los conectores "
                  "o al puerto del router o de la Raspberry."),
-    SOLO_DNS: ("Internet funciona, pero deja de resolverse el nombre de las webs (DNS). "
+    WEB: ("Hay conexión con los servidores, pero las webs de prueba no cargan: suele indicar bloqueos o cortes "
+          "hacia destinos concretos (rutas del operador) o problemas de DNS. Conviene reclamar al operador."),
+    SOLO_DNS: ("Internet funciona, pero deja de resolverse el nombre de las webs (DNS) en el DNS que usa la casa. "
                "Suele arreglarse cambiando el DNS del router a 1.1.1.1 / 8.8.8.8 o revisando el DNS del operador."),
 }
 

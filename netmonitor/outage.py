@@ -9,20 +9,25 @@ SIN_ENLACE = "sin_enlace"
 ROUTER = "router_inalcanzable"
 SIN_INTERNET = "sin_internet"
 SOLO_DNS = "solo_dns"
+WEB = "web_caida"
 
 # De menos a más grave: si durante una caída cambia el tipo, se conserva el más grave.
-SEVERITY = {SOLO_DNS: 1, SIN_INTERNET: 2, ROUTER: 3, SIN_ENLACE: 4}
+SEVERITY = {WEB: 1, SOLO_DNS: 2, SIN_INTERNET: 3, ROUTER: 4, SIN_ENLACE: 5}
 
 LABELS = {
     SIN_ENLACE: "Sin enlace Ethernet (cable o puerto)",
     ROUTER: "Router inalcanzable",
     SIN_INTERNET: "Router OK pero sin internet (operador)",
     SOLO_DNS: "Solo falla el DNS",
+    WEB: "Hay conexión pero las webs no cargan",
 }
 
 
-def classify(link_ok: bool, gw_ok: bool, net_ok: bool, dns_ok: bool) -> str:
-    """Estado de un ciclo, de la capa más baja a la más alta."""
+def classify(link_ok: bool, gw_ok: bool, net_ok: bool, dns_ok: bool, web_ok: bool = True) -> str:
+    """Estado de un ciclo, de la capa más baja a la más alta.
+
+    `dns_ok` se refiere al DNS que usa realmente la casa (router y operador), no a los públicos.
+    `web_ok`: alguna de las webs de prueba cargó."""
     if not link_ok:
         return SIN_ENLACE
     if not gw_ok:
@@ -31,6 +36,8 @@ def classify(link_ok: bool, gw_ok: bool, net_ok: bool, dns_ok: bool) -> str:
         return SIN_INTERNET
     if not dns_ok:
         return SOLO_DNS
+    if not web_ok:
+        return WEB
     return OK
 
 
@@ -40,6 +47,7 @@ class Incident:
     start_ts: int
     type: str
     end_ts: int | None = None
+    transition: bool = False        # True si empieza/termina por un cambio de tipo (sin recuperación entre medias)
 
     @property
     def duration(self) -> int | None:
@@ -51,6 +59,9 @@ class OutageTracker:
 
     - El inicio de la caída es el instante del primer fallo de la racha (no el de la confirmación).
     - El fin es el instante del primer acierto de la racha de recuperación.
+    - Si durante la caída el fallo cambia de tipo y el nuevo tipo se mantiene N ciclos seguidos, la caída
+      se parte en dos (sin hueco): así una caída de DNS que empezó con un corte del router no se
+      etiqueta durante horas como "router".
     """
 
     def __init__(self, fail_threshold: int = 3, recover_threshold: int = 2, open_incident: Incident | None = None):
@@ -59,9 +70,10 @@ class OutageTracker:
         self.current = open_incident
         self._fails: list[tuple[int, str]] = []
         self._oks: list[int] = []
+        self._switch: list[tuple[int, str]] = []
 
     def feed(self, ts: int, state: str) -> list[tuple[str, Incident]]:
-        """Procesa un ciclo. Devuelve eventos ('start'|'update'|'end', incidente)."""
+        """Procesa un ciclo. Devuelve eventos ('start'|'end', incidente)."""
         events: list[tuple[str, Incident]] = []
         if self.current is None:
             if state == OK:
@@ -69,20 +81,34 @@ class OutageTracker:
                 return events
             self._fails.append((ts, state))
             if len(self._fails) >= self.fail_n:
-                worst = max((s for _, s in self._fails), key=SEVERITY.get)
+                kinds = [s for _, s in self._fails]
+                worst = max(set(kinds), key=lambda k: (kinds.count(k), SEVERITY[k]))     # el más frecuente; empate: el más grave
                 self.current = Incident(None, self._fails[0][0], worst)
                 self._fails.clear()
                 self._oks.clear()
+                self._switch.clear()
                 events.append(("start", self.current))
             return events
 
         if state != OK:
             self._oks.clear()
-            if SEVERITY[state] > SEVERITY[self.current.type]:
-                self.current.type = state
-                events.append(("update", self.current))
+            if state == self.current.type:
+                self._switch.clear()
+                return events
+            if self._switch and self._switch[-1][1] != state:
+                self._switch.clear()
+            self._switch.append((ts, state))
+            if len(self._switch) >= self.fail_n:
+                boundary = self._switch[0][0]
+                old = self.current
+                old.end_ts, old.transition = boundary, True
+                events.append(("end", old))
+                self.current = Incident(None, boundary, state, transition=True)
+                self._switch.clear()
+                events.append(("start", self.current))
             return events
 
+        self._switch.clear()
         self._oks.append(ts)
         if len(self._oks) >= self.recover_n:
             self.current.end_ts = self._oks[0]

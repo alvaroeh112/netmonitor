@@ -22,6 +22,13 @@ log = logging.getLogger(__name__)
 Notify = Callable[[str], Awaitable[None]]
 
 
+def home_dns_ok(dns_rows, public: list[str]) -> bool:
+    """¿Resuelve el DNS que usan los dispositivos de casa (router y operador)? Los públicos solo sirven de contraste.
+    Si no hay DNS de casa conocidos, vale cualquiera."""
+    home = [ok for res, _, _, ok in dns_rows if res not in public]
+    return any(home) if home else any(ok for _, _, _, ok in dns_rows)
+
+
 def _failed_ping() -> PingResult:
     return PingResult(0, 0, 100.0, None, None, None, None)
 
@@ -108,8 +115,9 @@ class Monitor:
             gw_res, net_res, dns_rows, http_rows = await self._measure(carrier)
         gw_ok = gw_res.received > 0
         net_ok = any(r.received > 0 for r in net_res.values())
-        dns_ok = any(ok for _, _, _, ok in dns_rows)
-        state = classify(carrier, gw_ok, net_ok, dns_ok)
+        dns_ok = home_dns_ok(dns_rows, self.cfg.dns_public)
+        web_ok = any(ok for _, _, _, ok in http_rows)
+        state = classify(carrier, gw_ok, net_ok, dns_ok, web_ok)
 
         with self.db.tx() as c:
             c.execute("INSERT OR IGNORE INTO cycles(ts,state,link_ok,gw_ok,net_ok,dns_ok) VALUES(?,?,?,?,?,?)",
@@ -167,7 +175,11 @@ class Monitor:
             if kind == "start":
                 cur = self.db.execute("INSERT INTO incidents(start_ts,type) VALUES(?,?)", (inc.start_ts, inc.type))
                 inc.id = cur.lastrowid
-                log.warning("CAÍDA detectada: %s desde %s", inc.type, inc.start_ts)
+                log.warning("CAÍDA %s: %s desde %s", "cambia de tipo" if inc.transition else "detectada", inc.type, inc.start_ts)
+                if inc.transition:                      # misma caída, otro tipo de fallo: un aviso breve, sin contar como corte nuevo
+                    if not self.gate.flapping:
+                        await self._send(msg.outage_changed(inc, self.cfg.tz))
+                    continue
                 decision = self.gate.on_start(ts)
                 if decision == AlertGate.SEND:
                     await self._send(msg.outage_start(inc, self.cfg.tz))
@@ -177,7 +189,9 @@ class Monitor:
                 self.db.execute("UPDATE incidents SET type=? WHERE id=?", (inc.type, inc.id))
             elif kind == "end":
                 self.db.execute("UPDATE incidents SET end_ts=? WHERE id=?", (inc.end_ts, inc.id))
-                log.warning("Caída recuperada: duración %s s", inc.duration)
+                log.warning("Caída %s: duración %s s", "cambia de tipo" if inc.transition else "recuperada", inc.duration)
+                if inc.transition:
+                    continue
                 if self.gate.on_end(ts) == AlertGate.SEND:
                     await self._send(msg.outage_end(inc, self.cfg.tz))
 

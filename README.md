@@ -17,7 +17,15 @@ y te la muestra en estadísticas claras (estado, caídas, velocidad, horas malas
 | 6 h | `mtr` a un destino fijo para ver en qué salto aparece pérdida o latencia |
 
 **Caída** = N fallos seguidos (por defecto 3, ≈ 1,5 min). Se clasifica en:
-`Sin enlace Ethernet` · `Router inalcanzable` · `Router OK pero sin internet (operador)` · `Solo falla el DNS`.
+`Sin enlace Ethernet` · `Router inalcanzable` · `Router OK pero sin internet (operador)` · `Solo falla el DNS` ·
+`Hay conexión pero las webs no cargan`.
+
+- El criterio de **DNS** es el que usan los dispositivos de casa (el del router y el que da el operador). Que responda
+  1.1.1.1 no basta: los DNS públicos solo sirven de contraste en el informe.
+- Si durante una caída el tipo de fallo cambia y se mantiene N ciclos, la caída se parte en dos sin hueco (un aviso breve de
+  "cambia el problema"), para no etiquetar horas de DNS como "router" por un corte inicial.
+- Si cambias estos criterios, `python -m netmonitor.reclassify` (con el servicio parado) rehace el histórico y los incidentes.
+
 Se guarda inicio, fin y duración exacta (el inicio es el primer fallo, no el momento de confirmarlo).
 
 > El ping usa 1 paquete por segundo: varios servidores (8.8.8.8, 9.9.9.9) limitan el ICMP rápido y
