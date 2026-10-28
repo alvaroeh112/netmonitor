@@ -10,6 +10,7 @@ ROUTER = "router_inalcanzable"
 SIN_INTERNET = "sin_internet"
 SOLO_DNS = "solo_dns"
 WEB = "web_caida"
+DNS_DEG = "dns_degradado"      # no es una caída: el DNS de casa falla pero algún DNS público responde
 
 # De menos a más grave: si durante una caída cambia el tipo, se conserva el más grave.
 SEVERITY = {WEB: 1, SOLO_DNS: 2, SIN_INTERNET: 3, ROUTER: 4, SIN_ENLACE: 5}
@@ -18,16 +19,21 @@ LABELS = {
     SIN_ENLACE: "Sin enlace Ethernet (cable o puerto)",
     ROUTER: "Router inalcanzable",
     SIN_INTERNET: "Router OK pero sin internet (operador)",
-    SOLO_DNS: "Solo falla el DNS",
+    SOLO_DNS: "Solo falla el DNS (ningún servidor responde)",
     WEB: "Hay conexión pero las webs no cargan",
+    DNS_DEG: "DNS del operador degradado (internet funciona)",
 }
 
 
-def classify(link_ok: bool, gw_ok: bool, net_ok: bool, dns_ok: bool, web_ok: bool = True) -> str:
+def classify(link_ok: bool, gw_ok: bool, net_ok: bool, dns_ok: bool, web_ok: bool = True,
+             public_dns_ok: bool = False, dns_clean: bool = True) -> str:
     """Estado de un ciclo, de la capa más baja a la más alta.
 
     `dns_ok` se refiere al DNS que usa realmente la casa (router y operador), no a los públicos.
-    `web_ok`: alguna de las webs de prueba cargó."""
+    `public_dns_ok`: algún DNS público (1.1.1.1...) respondió. Si el de casa falla pero uno público responde,
+    internet funciona: es un DNS degradado (DNS_DEG), no una caída. Solo es caída (SOLO_DNS) si no responde ninguno.
+    `web_ok`: alguna de las webs de prueba cargó. `dns_clean`: ninguna consulta al DNS de casa falló en el ciclo;
+    si las webs fallan con el DNS a medias, lo más probable es que sea el DNS (DNS_DEG) y no un corte de webs."""
     if not link_ok:
         return SIN_ENLACE
     if not gw_ok:
@@ -35,9 +41,9 @@ def classify(link_ok: bool, gw_ok: bool, net_ok: bool, dns_ok: bool, web_ok: boo
     if not net_ok:
         return SIN_INTERNET
     if not dns_ok:
-        return SOLO_DNS
+        return DNS_DEG if public_dns_ok else SOLO_DNS
     if not web_ok:
-        return WEB
+        return WEB if dns_clean else DNS_DEG
     return OK
 
 
@@ -73,7 +79,9 @@ class OutageTracker:
         self._switch: list[tuple[int, str]] = []
 
     def feed(self, ts: int, state: str) -> list[tuple[str, Incident]]:
-        """Procesa un ciclo. Devuelve eventos ('start'|'end', incidente)."""
+        """Procesa un ciclo. Devuelve eventos ('start'|'end', incidente). DNS_DEG cuenta como ciclo sano."""
+        if state == DNS_DEG:
+            state = OK
         events: list[tuple[str, Incident]] = []
         if self.current is None:
             if state == OK:
@@ -116,6 +124,39 @@ class OutageTracker:
             self.current = None
             self._oks.clear()
         return events
+
+
+class DegradeWatch:
+    """Vigila rachas de DNS degradado (no son caídas). Avisa una sola vez cuando una racha dura `alert_after`
+    ciclos seguidos y avisa de su fin tras `recover_after` ciclos sanos; las rachas cortas pasan sin aviso."""
+
+    def __init__(self, alert_after: int = 30, recover_after: int = 4):
+        self.alert_after = alert_after
+        self.recover_after = recover_after
+        self.since: int | None = None        # inicio de la racha en curso
+        self.alerted = False
+        self._bad = 0
+        self._good = 0
+
+    def feed(self, ts: int, degraded: bool) -> tuple[str, int] | None:
+        """Devuelve ('alert', inicio) o ('end', inicio) cuando toca avisar; si no, None."""
+        if degraded:
+            self._good = 0
+            if self.since is None:
+                self.since = ts
+            self._bad += 1
+            if self._bad >= self.alert_after and not self.alerted:
+                self.alerted = True
+                return "alert", self.since
+            return None
+        if self.since is None:
+            return None
+        self._good += 1
+        if self._good >= self.recover_after:
+            started, was_alerted = self.since, self.alerted
+            self.since, self.alerted, self._bad, self._good = None, False, 0, 0
+            return ("end", started) if was_alerted else None
+        return None
 
 
 class AlertGate:

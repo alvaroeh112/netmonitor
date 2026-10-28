@@ -92,6 +92,7 @@ def build_report(db: Database, cfg: Config, period_label: str, seconds: int, now
             ["Jitter medio", num(s["jitter_avg"], 1, "ms")],
             ["Latencia hasta el router", num(s["gw_lat_avg"], 1, "ms")],
             ["Fallos de DNS / de carga web", f"{num(s['dns_fail_pct'], 1, '%')} / {num(s['http_fail_pct'], 1, '%')}"],
+            ["DNS del operador degradado (sin ser caída)", f"{num(s.get('dns_degraded_pct'), 1, '%')} del tiempo · {s.get('dns_degraded_episodes', 0)} episodios"],
             ["Descarga media (mín - máx)", f"{num(s['down_avg'], 0)} ({num(s['down_min'], 0)} - {num(s['down_max'], 0)}) Mbps"],
             ["Subida media (mín - máx)", f"{num(s['up_avg'], 0)} ({num(s['up_min'], 0)} - {num(s['up_max'], 0)}) Mbps"],
             ["Tests de velocidad realizados", str(s["speed_n"])]]

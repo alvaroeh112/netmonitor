@@ -13,8 +13,8 @@ CAUSE_TEXT = {
                  "o al puerto del router o de la Raspberry."),
     WEB: ("Hay conexión con los servidores, pero las webs de prueba no cargan: suele indicar bloqueos o cortes "
           "hacia destinos concretos (rutas del operador) o problemas de DNS. Conviene reclamar al operador."),
-    SOLO_DNS: ("Internet funciona, pero deja de resolverse el nombre de las webs (DNS) en el DNS que usa la casa. "
-               "Suele arreglarse cambiando el DNS del router a 1.1.1.1 / 8.8.8.8 o revisando el DNS del operador."),
+    SOLO_DNS: ("Los paquetes llegan, pero no responde ningún servidor DNS (ni el de la casa ni los públicos), así que "
+               "no se pueden resolver nombres. Conviene revisar el router y reclamar al operador."),
 }
 
 
@@ -59,6 +59,12 @@ def conclusion(s: dict, incs: list[dict], max_temp: float | None = None) -> list
     elif any(v >= 20 for v in dns.values()):
         flaky = ", ".join(f"{r} ({v:.0f} %)" for r, v in dns.items() if v >= 20)
         out.append(f"Hay fallos intermitentes de DNS en: {flaky}.")
+    if (s.get("dns_degraded_pct") or 0) >= 2:
+        out.append(f"El DNS del operador estuvo degradado el {num(s['dns_degraded_pct'], 1, '%')} del tiempo "
+                   f"({s['dns_degraded_episodes']} episodios de más de 1 min, el más largo {fmt_dur(s['dns_degraded_longest'])}) "
+                   "mientras los DNS públicos sí respondían. No es una caída de internet, pero los dispositivos que usan ese DNS "
+                   "ven webs lentas o que no cargan. Se corrige poniendo 1.1.1.1 / 1.0.0.1 como DNS en el router, y es un fallo "
+                   "que se puede reclamar al operador.")
     if s["loss_avg"] is not None and s["loss_avg"] >= 2 and not (len(lbt) > 1 and max(lbt.values()) >= 20 and min(lbt.values()) < 5):
         out.append(f"Hay pérdida de paquetes apreciable ({num(s['loss_avg'], 1, '%')}), que degrada llamadas y juegos.")
     if s["lat_p95"] is not None and s["lat_p95"] > 100:

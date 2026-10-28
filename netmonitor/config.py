@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 _DEFAULT_HTTP = [
     "https://www.google.com/generate_204",
     "https://www.cloudflare.com/cdn-cgi/trace",
-    "https://www.wikipedia.org",
+    "https://www.apple.com/library/test/success.html",     # wikipedia.org devuelve 403 a los clientes httpx
 ]
 
 
@@ -47,6 +47,7 @@ class Config:
     retention_days: int = 30
     agg_retention_days: int = 365
     max_db_mb: int = 500
+    dns_degraded_alert_min: int = 15        # minutos seguidos de DNS degradado antes de avisar
 
     @property
     def tz(self) -> ZoneInfo:
@@ -86,4 +87,5 @@ def load_config() -> Config:
         retention_days=max(3, _int("RETENTION_DAYS", 30)),
         agg_retention_days=max(30, _int("AGG_RETENTION_DAYS", 365)),
         max_db_mb=max(50, _int("MAX_DB_MB", 500)),
+        dns_degraded_alert_min=max(1, _int("DNS_DEGRADED_ALERT_MIN", 15)),
     )

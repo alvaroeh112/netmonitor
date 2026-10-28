@@ -71,6 +71,36 @@ def downtime_seconds(incs: list[dict], start: int, end: int, now: int) -> int:
     return total
 
 
+def degraded_runs(db: Database, start: int, end: int, min_cycles: int = 3) -> tuple[int, int, int]:
+    """Ciclos con DNS degradado y rachas de >= `min_cycles` ciclos seguidos (hueco máx. 90 s):
+    (ciclos, episodios, racha más larga en segundos)."""
+    rows = db.query("SELECT ts, state FROM cycles WHERE ts>=? AND ts<=? ORDER BY ts", (start, end))
+    total, eps, longest = 0, 0, 0
+    run, run_start, prev = 0, 0, 0
+
+    def close():
+        nonlocal eps, longest, run
+        if run >= min_cycles:
+            eps += 1
+            longest = max(longest, prev - run_start + 30)
+        run = 0
+
+    for r in rows:
+        if r["state"] == "dns_degradado":
+            total += 1
+            if run and r["ts"] - prev > 90:
+                close()
+            if not run:
+                run_start = r["ts"]
+            run += 1
+            prev = r["ts"]
+        elif run:
+            close()
+    if run:
+        close()
+    return total, eps, longest
+
+
 def summary(db: Database, seconds: int, now: int | None = None) -> dict:
     """Todas las cifras de un periodo. El periodo se recorta al inicio real de los datos."""
     now = now or int(time.time())
@@ -87,6 +117,7 @@ def summary(db: Database, seconds: int, now: int | None = None) -> dict:
     lat = [r["rtt_avg"] for r in net if r["rtt_avg"] is not None]
     gw = db.query("SELECT rtt_avg, loss FROM ping WHERE kind='gateway' AND ts>=? AND ts<=?", (start, now))
     dns = db.one("SELECT COUNT(*) n, SUM(1-ok) f FROM dns WHERE ts>=? AND ts<=?", (start, now))
+    slow = db.one("SELECT SUM(ok=1 AND ms>=1500) s FROM dns WHERE ts>=? AND ts<=?", (start, now))
     http = db.one("SELECT COUNT(*) n, SUM(1-ok) f FROM http WHERE ts>=? AND ts<=?", (start, now))
     by_target = {r["target"]: r["l"] for r in db.query(
         "SELECT target, AVG(loss) l FROM ping WHERE kind='internet' AND ts>=? AND ts<=? GROUP BY target ORDER BY target", (start, now))}
@@ -96,6 +127,7 @@ def summary(db: Database, seconds: int, now: int | None = None) -> dict:
     downs = [r["down_mbps"] for r in sp]
     ups = [r["up_mbps"] for r in sp]
     ncyc = db.one("SELECT COUNT(*) n FROM cycles WHERE ts>=? AND ts<=?", (start, now))["n"]
+    deg_cycles, deg_eps, deg_longest = degraded_runs(db, start, now)
 
     return {
         "start": start, "end": now, "span": span, "cycles": ncyc,
@@ -106,6 +138,9 @@ def summary(db: Database, seconds: int, now: int | None = None) -> dict:
         "jitter_avg": mean([r["jitter"] for r in net]),
         "gw_lat_avg": mean([r["rtt_avg"] for r in gw]), "gw_loss_avg": mean([r["loss"] for r in gw]),
         "dns_fail_pct": (100.0 * dns["f"] / dns["n"]) if dns["n"] else None,
+        "dns_slow_pct": (100.0 * (slow["s"] or 0) / dns["n"]) if dns["n"] else None,
+        "dns_degraded_pct": (100.0 * deg_cycles / ncyc) if ncyc else 0.0,
+        "dns_degraded_episodes": deg_eps, "dns_degraded_longest": deg_longest,
         "http_fail_pct": (100.0 * http["f"] / http["n"]) if http["n"] else None,
         "loss_by_target": by_target, "dns_by_resolver": by_resolver,
         "speed_n": len(sp),
@@ -119,7 +154,7 @@ def hourly_profile(db: Database, seconds: int, tz: ZoneInfo, now: int | None = N
     """Perfil por hora del día (0-23, hora local): latencia, pérdida y % de ciclos con fallo."""
     now = now or int(time.time())
     start = now - seconds
-    buckets = {h: {"lat": [], "loss": [], "bad": 0, "n": 0} for h in range(24)}
+    buckets = {h: {"lat": [], "loss": [], "bad": 0, "deg": 0, "n": 0} for h in range(24)}
     for r in db.query("SELECT ts, rtt_avg, loss FROM ping WHERE kind='internet' AND ts>=? AND ts<=?", (start, now)):
         h = datetime.fromtimestamp(r["ts"], tz).hour
         if r["rtt_avg"] is not None:
@@ -128,12 +163,14 @@ def hourly_profile(db: Database, seconds: int, tz: ZoneInfo, now: int | None = N
     for r in db.query("SELECT ts, state FROM cycles WHERE ts>=? AND ts<=?", (start, now)):
         h = datetime.fromtimestamp(r["ts"], tz).hour
         buckets[h]["n"] += 1
-        buckets[h]["bad"] += 0 if r["state"] == "ok" else 1
+        buckets[h]["bad"] += 0 if r["state"] in ("ok", "dns_degradado") else 1       # el DNS degradado no es un fallo de conexión
+        buckets[h]["deg"] += r["state"] == "dns_degradado"
     out = []
     for h in range(24):
         b = buckets[h]
         out.append({"hour": h, "lat": mean(b["lat"]), "loss": mean(b["loss"]),
-                    "fail_pct": (100.0 * b["bad"] / b["n"]) if b["n"] else None, "n": b["n"]})
+                    "fail_pct": (100.0 * b["bad"] / b["n"]) if b["n"] else None,
+                    "deg_pct": (100.0 * b["deg"] / b["n"]) if b["n"] else None, "n": b["n"]})
     return out
 
 
@@ -162,7 +199,7 @@ def latest_status(db: Database, now: int | None = None, public_dns: tuple[str, .
     dns_rows = db.query("SELECT resolver, ok FROM dns WHERE ts=?", (cyc["ts"],)) if cyc else []
     home = [r["ok"] for r in dns_rows if r["resolver"] not in public_dns] or [r["ok"] for r in dns_rows]
     since = now - 3600
-    h1 = db.one("SELECT COUNT(*) n, SUM(state!='ok') b FROM cycles WHERE ts>=?", (since,))
+    h1 = db.one("SELECT COUNT(*) n, SUM(state NOT IN ('ok','dns_degradado')) b FROM cycles WHERE ts>=?", (since,))
     return {"cycle": cyc, "gw": gw, "net": net, "sys": sysi, "link": link, "speed": spd, "open_incident": inc,
             "web_all_failed": bool(web and web["n"] and not web["o"]),
             "web_ok": (web["o"] or 0) if web else 0, "web_n": web["n"] if web else 0,

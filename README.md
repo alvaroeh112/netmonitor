@@ -17,11 +17,17 @@ y te la muestra en estadísticas claras (estado, caídas, velocidad, horas malas
 | 6 h | `mtr` a un destino fijo para ver en qué salto aparece pérdida o latencia |
 
 **Caída** = N fallos seguidos (por defecto 3, ≈ 1,5 min). Se clasifica en:
-`Sin enlace Ethernet` · `Router inalcanzable` · `Router OK pero sin internet (operador)` · `Solo falla el DNS` ·
+`Sin enlace Ethernet` · `Router inalcanzable` · `Router OK pero sin internet (operador)` · `Solo falla el DNS (ningún servidor responde)` ·
 `Hay conexión pero las webs no cargan`.
 
-- El criterio de **DNS** es el que usan los dispositivos de casa (el del router y el que da el operador). Que responda
-  1.1.1.1 no basta: los DNS públicos solo sirven de contraste en el informe.
+- **DNS**: lo que cuenta es el DNS que usan los dispositivos de casa (el del operador, y el del router solo si
+  realmente sirve DNS: muchos routers no contestan y se dejan fuera). Los fallos de DNS son un caso especial:
+  - Si falla el DNS de casa **pero algún DNS público (1.1.1.1...) responde**, internet funciona: es
+    `DNS del operador degradado` (🟡), **no es una caída**. Se ve en `/estado`, `/resumen`, `/horas` y el informe como
+    porcentaje de tiempo, y solo avisa si dura más de `DNS_DEGRADED_ALERT_MIN` minutos seguidos (15 por defecto).
+  - Solo es caída (`Solo falla el DNS`) si no responde ningún servidor, ni los de casa ni los públicos.
+- Cada consulta DNS reintenta una vez (1,5 s + 1,5 s) y los dominios se consultan de uno en uno por servidor, para no
+  falsear los tiempos con ráfagas. Las respuestas que necesitan reintento se cuentan aparte como "lentas".
 - Si durante una caída el tipo de fallo cambia y se mantiene N ciclos, la caída se parte en dos sin hueco (un aviso breve de
   "cambia el problema"), para no etiquetar horas de DNS como "router" por un corte inicial.
 - Si cambias estos criterios, `python -m netmonitor.reclassify` (con el servicio parado) rehace el histórico y los incidentes.

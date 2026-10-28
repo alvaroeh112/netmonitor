@@ -48,18 +48,24 @@ async def ping_host(host: str, count: int = 10, interval: float = 0.2) -> PingRe
     return parse_ping(out, sent_fallback=count)
 
 
-async def dns_query(resolver: str, domain: str, timeout: float = 3.0) -> tuple[float | None, bool]:
-    """Resuelve `domain` contra un servidor DNS concreto. Devuelve (ms | None, ok)."""
-    r = dns.asyncresolver.Resolver(configure=False)
-    r.nameservers = [resolver]
-    r.lifetime = timeout
-    r.timeout = timeout
+async def dns_query(resolver: str, domain: str, timeout: float = 3.0, attempts: int = 2) -> tuple[float | None, bool]:
+    """Resuelve `domain` contra un servidor DNS concreto. Devuelve (ms | None, ok).
+
+    Como hace cualquier cliente real, reintenta: `attempts` envíos que se reparten el `timeout` total. Una respuesta
+    que llega tras el reintento tarda >= timeout/attempts, así que se distingue de una consulta fallida."""
+    per_try = timeout / attempts
     t0 = time.perf_counter()
-    try:
-        await r.resolve(domain, "A")
-        return (time.perf_counter() - t0) * 1000, True
-    except (dns.exception.DNSException, OSError):
-        return None, False
+    for _ in range(attempts):
+        r = dns.asyncresolver.Resolver(configure=False)
+        r.nameservers = [resolver]
+        r.lifetime = per_try
+        r.timeout = per_try
+        try:
+            await r.resolve(domain, "A")
+            return (time.perf_counter() - t0) * 1000, True
+        except (dns.exception.DNSException, OSError):
+            continue
+    return None, False
 
 
 async def http_check(client: httpx.AsyncClient, url: str) -> tuple[float | None, int | None, bool]:

@@ -32,7 +32,9 @@ class Scenario:
         web = step[4] if len(step) > 4 else net
         self.i += 1
         net_res = {"1.1.1.1": good() if net else dead(), "8.8.8.8": good() if net else dead()}
-        return (good() if gw else dead(), net_res, [("gw", "google.com", 10.0 if dns else None, dns), ("1.1.1.1", "google.com", 20.0, True)],
+        home_ok = dns is True
+        pub_ok = dns is True or dns == "deg"          # "deg": solo falla el DNS de casa, el público responde
+        return (good() if gw else dead(), net_res, [("gw", "google.com", 10.0 if home_ok else None, home_ok), ("1.1.1.1", "google.com", 20.0 if pub_ok else None, pub_ok)],
                 [("https://x", 50.0 if web else None, 204 if web else None, web)])
 
 
@@ -147,14 +149,32 @@ async def test_restart_closes_stale_incident_and_resumes_recent(db, make):
     assert m.tracker.current is None
 
 
-async def test_only_public_dns_working_counts_as_dns_outage(make, db):
-    """El caso real: 1.1.1.1 resuelve pero el DNS de casa no -> el usuario no puede navegar -> es una caída."""
+async def test_only_home_dns_failing_is_degraded_not_an_outage(make, db):
+    """1.1.1.1 resuelve pero el DNS de casa no: internet funciona, no es caída (se ve en los ciclos, sin incidente)."""
     build, sent, _ = make
-    steps = [OKS] + [(True, True, True, False)] * 3 + [OKS] * 3
+    steps = [OKS] + [(True, True, True, "deg")] * 6 + [OKS] * 3
     m, _ = build(steps)
     await run_n(m, len(steps), 1_800_000_000)
-    inc = db.query("SELECT type FROM incidents")
-    assert [r["type"] for r in inc] == ["solo_dns"]
+    assert db.query("SELECT type FROM incidents") == []
+    assert db.one("SELECT COUNT(*) n FROM cycles WHERE state='dns_degradado'")["n"] == 6
+    assert sent == []                                         # una racha corta no avisa
+
+
+async def test_long_degraded_dns_alerts_once_and_reports_end(make, db):
+    build, sent, _ = make
+    steps = [OKS] + [(True, True, True, "deg")] * 40 + [OKS] * 5
+    m, _ = build(steps)                                       # 15 min = 30 ciclos de 30 s
+    await run_n(m, len(steps), 1_800_000_000)
+    assert db.query("SELECT type FROM incidents") == []
+    assert len(sent) == 2 and "DNS del operador degradado" in sent[0] and "vuelve a responder" in sent[1]
+
+
+async def test_degraded_dns_does_not_hide_a_real_outage(make, db):
+    build, _, _ = make
+    steps = [OKS] + [(True, True, True, "deg")] * 3 + [(True, True, False, False)] * 4 + [OKS] * 3
+    m, _ = build(steps)
+    await run_n(m, len(steps), 1_800_000_000)
+    assert [r["type"] for r in db.query("SELECT type FROM incidents")] == ["sin_internet"]
 
 
 async def test_all_webs_failing_is_an_outage_even_if_pings_and_dns_work(make, db):

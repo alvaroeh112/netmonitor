@@ -10,6 +10,7 @@ import sys
 
 from .config import Config
 from .db import Database
+from .monitor import is_private
 from .outage import OutageTracker, classify
 
 
@@ -21,11 +22,17 @@ def reclassify(db: Database, cfg: Config) -> dict:
     public = set(cfg.dns_public)
 
     home_dns: dict[int, bool] = {}
+    pub_dns: dict[int, bool] = {}
+    clean: dict[int, bool] = {}
     any_dns: dict[int, bool] = {}
     for r in db.query("SELECT ts, resolver, ok FROM dns WHERE ts>=?", (first,)):
         any_dns[r["ts"]] = any_dns.get(r["ts"], False) or bool(r["ok"])
+        if r["resolver"] not in public and not is_private(r["resolver"]):
+            clean[r["ts"]] = clean.get(r["ts"], True) and bool(r["ok"])
         if r["resolver"] not in public:
             home_dns[r["ts"]] = home_dns.get(r["ts"], False) or bool(r["ok"])
+        else:
+            pub_dns[r["ts"]] = pub_dns.get(r["ts"], False) or bool(r["ok"])
     web: dict[int, bool] = {}
     for r in db.query("SELECT ts, ok FROM http WHERE ts>=?", (first,)):
         web[r["ts"]] = web.get(r["ts"], False) or bool(r["ok"])
@@ -50,7 +57,7 @@ def reclassify(db: Database, cfg: Config) -> dict:
         prev = ts
         dns_ok = home_dns[ts] if ts in home_dns else any_dns.get(ts, bool(c["dns_ok"]))
         web_ok = web.get(ts, True)
-        state = classify(bool(c["link_ok"]), bool(c["gw_ok"]), bool(c["net_ok"]), dns_ok, web_ok)
+        state = classify(bool(c["link_ok"]), bool(c["gw_ok"]), bool(c["net_ok"]), dns_ok, web_ok, pub_dns.get(ts, False), clean.get(ts, True))
         if state != c["state"] or int(dns_ok) != c["dns_ok"]:
             changed += 1
             updates.append((state, int(dns_ok), ts))

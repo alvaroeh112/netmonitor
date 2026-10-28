@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from .outage import LABELS
+from .outage import DNS_DEG, LABELS
 
 WIFI_NOTE = ("ℹ️ Las medidas se hacen por cable desde la Raspberry: no reflejan el wifi. "
              "Para medir el wifi hace falta una sonda aparte (otra Raspberry o móvil conectado por wifi "
@@ -36,7 +36,12 @@ def fmt_dur(seconds: float | int | None) -> str:
 
 def fmt_dt(ts: int | float, tz: ZoneInfo, with_date: bool = True) -> str:
     dt = datetime.fromtimestamp(ts, tz)
-    return dt.strftime("%d/%m %H:%M") if with_date else dt.strftime("%H:%M")
+    text = dt.strftime("%d/%m %H:%M") if with_date else dt.strftime("%H:%M")
+    # Al acabar el horario de verano la hora 02:00-02:59 ocurre dos veces: se distingue con CEST/CET
+    # para que un fin como "02:06" tras un inicio "02:57" no parezca anterior al inicio.
+    if dt.replace(fold=0).utcoffset() != dt.replace(fold=1).utcoffset():
+        text += f" {dt.tzname()}"
+    return text
 
 
 def fmt_ago(ts: int | float, now: int | float) -> str:
@@ -60,6 +65,17 @@ def outage_changed(inc, tz: ZoneInfo) -> str:
             f"(desde las {fmt_dt(inc.start_ts, tz, False)}).")
 
 
+def dns_degraded(since: int, tz: ZoneInfo) -> str:
+    return (f"🟡 DNS del operador degradado desde las {fmt_dt(since, tz, False)}.\n"
+            "Internet funciona (los DNS públicos responden), pero los dispositivos que usan el DNS del operador "
+            "pueden ver webs lentas o que no cargan. No es una caída. Solución: poner 1.1.1.1 y 1.0.0.1 como DNS en el router.")
+
+
+def dns_degraded_end(since: int, end: int, tz: ZoneInfo) -> str:
+    return (f"🟢 El DNS del operador vuelve a responder. Estuvo degradado {fmt_dur(end - since)} "
+            f"({fmt_dt(since, tz, False)} → {fmt_dt(end, tz, False)}).")
+
+
 def flapping(count: int) -> str:
     return (f"🟠 Conexión inestable: {count} cortes en pocos minutos.\n"
             "Dejo de avisar uno a uno y te escribo cuando se estabilice.")
@@ -79,6 +95,8 @@ def semaforo(st: dict) -> tuple[str, str]:
         return "🔴", "El monitor no ha medido en los últimos 2 minutos"
     if st["open_incident"] is not None:
         return "🔴", f"Caída en curso: {LABELS[st['open_incident']['type']]}"
+    if cyc["state"] == DNS_DEG:
+        return "🟡", f"{LABELS[DNS_DEG]}: las webs pueden ir lentas con el DNS del operador"
     if cyc["state"] != "ok":
         return "🟡", f"Posible problema: {LABELS.get(cyc['state'], cyc['state'])}"
     net = [r for r in st["net"] if r["rtt_avg"] is not None]
@@ -127,8 +145,11 @@ def resumen(s: dict, label: str, tz: ZoneInfo) -> str:
         f"🔴 Caídas: {s['incidents']} · sin conexión {fmt_dur(s['downtime'])}",
         f"⏱️ Latencia: media {num(s['lat_avg'], 0, 'ms')} · p95 {num(s['lat_p95'], 0, 'ms')} · jitter {num(s['jitter_avg'], 1, 'ms')}",
         f"📉 Pérdida media: {num(s['loss_avg'], 2, '%')} · router: {num(s['gw_lat_avg'], 1, 'ms')}",
-        f"🌐 Fallos DNS: {num(s['dns_fail_pct'], 1, '%')} · fallos web: {num(s['http_fail_pct'], 1, '%')}",
+        f"🌐 Fallos DNS: {num(s['dns_fail_pct'], 1, '%')} (lentas: {num(s.get('dns_slow_pct'), 1, '%')}) · fallos web: {num(s['http_fail_pct'], 1, '%')}",
     ]
+    if s.get("dns_degraded_pct"):
+        lines.append(f"🟡 DNS del operador degradado (sin ser caída): {num(s['dns_degraded_pct'], 1, '%')} del tiempo · "
+                     f"{s['dns_degraded_episodes']} episodios de más de 1 min, el más largo {fmt_dur(s['dns_degraded_longest'])}")
     if s.get("loss_by_target") and len(s["loss_by_target"]) > 1:
         lines.append("🎯 Pérdida por servidor: " + " · ".join(f"{t} {num(v, 0, '%')}" for t, v in s["loss_by_target"].items()))
     bad_dns = {r: v for r, v in (s.get("dns_by_resolver") or {}).items() if v >= 20}
@@ -193,12 +214,12 @@ def test_result(res: dict, loss_line: str) -> str:
 def horas(profile: list[dict], bad: list[dict], label: str) -> str:
     if not any(p["n"] for p in profile):
         return "🕒 Aún no hay datos para el mapa por horas."
-    lines = [f"🕒 Latencia por hora del día ({label}, hora local)", "Hora  Latencia  Pérdida  Fallos"]
+    lines = [f"🕒 Latencia por hora del día ({label}, hora local)", "Hora  Latencia  Pérdida  Fallos  DNS deg."]
     for p in profile:
         if not p["n"]:
             continue
         flag = " ⚠️" if p in bad else ""
-        lines.append(f"{p['hour']:02d}h  {num(p['lat'], 0, 'ms'):>8}  {num(p['loss'], 1, '%'):>7}  {num(p['fail_pct'], 1, '%'):>6}{flag}")
+        lines.append(f"{p['hour']:02d}h  {num(p['lat'], 0, 'ms'):>8}  {num(p['loss'], 1, '%'):>7}  {num(p['fail_pct'], 1, '%'):>6}  {num(p.get('deg_pct'), 1, '%'):>7}{flag}")
     if bad:
         hrs = ", ".join(f"{p['hour']:02d}h" for p in sorted(bad, key=lambda p: p["hour"]))
         lines.append(f"\n⚠️ Peores franjas: {hrs}")

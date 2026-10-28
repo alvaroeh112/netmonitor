@@ -96,3 +96,32 @@ def test_alert_gate_old_starts_expire():
     g = AlertGate(window=600, max_starts=3, quiet=600)
     for t in (0, 1000, 2000, 3000):
         assert g.on_start(t) == g.SEND
+
+
+def test_dns_degraded_when_only_home_dns_fails():
+    from netmonitor.outage import DNS_DEG
+    assert classify(True, True, True, False, True, public_dns_ok=True) == DNS_DEG
+    assert classify(True, True, True, False, True, public_dns_ok=False) == SOLO_DNS      # no responde ninguno: caída
+    assert classify(True, True, False, False, True, public_dns_ok=True) == SIN_INTERNET     # lo más grave manda
+
+
+def test_degraded_cycles_do_not_open_an_incident():
+    from netmonitor.outage import DNS_DEG
+    tr = OutageTracker(3, 2)
+    assert [e for ts in range(10) for e in tr.feed(ts, DNS_DEG)] == [] and tr.current is None
+
+
+def test_degrade_watch_alerts_after_a_long_streak_and_ignores_short_ones():
+    from netmonitor.outage import DegradeWatch
+    w = DegradeWatch(alert_after=5, recover_after=2)
+    assert [w.feed(t, True) for t in range(4)] == [None] * 4
+    assert [w.feed(t, False) for t in (4, 5)] == [None, None]          # racha corta: sin aviso
+    out = [w.feed(t, True) for t in range(10, 16)]
+    assert out[4] == ("alert", 10) and out.count(None) == 5            # un solo aviso
+    assert w.feed(16, False) is None and w.feed(17, False) == ("end", 10)
+
+
+def test_webs_failing_with_a_half_working_dns_is_blamed_on_the_dns():
+    from netmonitor.outage import DNS_DEG
+    assert classify(True, True, True, True, web_ok=False, public_dns_ok=True, dns_clean=False) == DNS_DEG
+    assert classify(True, True, True, True, web_ok=False, public_dns_ok=True, dns_clean=True) == WEB

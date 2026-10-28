@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 import time
@@ -14,7 +15,7 @@ from . import messages as msg
 from . import retention
 from .config import Config
 from .db import Database
-from .outage import OK, AlertGate, Incident, OutageTracker, classify
+from .outage import DNS_DEG, AlertGate, DegradeWatch, Incident, OutageTracker, classify
 from .parsers import PingResult, analyze_trace
 
 log = logging.getLogger(__name__)
@@ -29,6 +30,19 @@ def home_dns_ok(dns_rows, public: list[str]) -> bool:
     return any(home) if home else any(ok for _, _, _, ok in dns_rows)
 
 
+def is_private(addr: str) -> bool:
+    try:
+        return ipaddress.ip_address(addr).is_private
+    except ValueError:
+        return False
+
+
+def home_dns_clean(dns_rows, public: list[str]) -> bool:
+    """¿Respondieron TODAS las consultas al DNS de casa? Se ignoran las IP privadas (un router que no sirve DNS)."""
+    home = [ok for res, _, _, ok in dns_rows if res not in public and not is_private(res)]
+    return all(home)
+
+
 def _failed_ping() -> PingResult:
     return PingResult(0, 0, 100.0, None, None, None, None)
 
@@ -41,6 +55,8 @@ class Monitor:
         self.lock = asyncio.Lock()          # una sola medición pesada a la vez (evita que el speedtest falsee los pings)
         self.tracker = OutageTracker(cfg.fail_threshold, cfg.recover_threshold)
         self.gate = AlertGate()
+        self.degrade = DegradeWatch(max(1, round(cfg.dns_degraded_alert_min * 60 / cfg.cycle_seconds)))
+        self._gw_dns = False                # ¿el router sirve DNS? (muchos solo hacen de reenviador interno y no contestan)
         self.last_cycle_ts: int | None = None
         self.last_error: str | None = None
         self._tasks: list[asyncio.Task] = []
@@ -57,6 +73,7 @@ class Monitor:
             self.iface = self.iface or iface or "eth0"
             self.gateway = self.gateway or gw
         self._recover_open_incident()
+        await self._probe_gateway_dns()
         row = self.db.one("SELECT public_ip FROM sysinfo WHERE public_ip IS NOT NULL ORDER BY ts DESC LIMIT 1")
         self._last_public_ip = row["public_ip"] if row else None
         log.info("Monitor iniciado: interfaz=%s gateway=%s", self.iface, self.gateway or "?")
@@ -117,7 +134,8 @@ class Monitor:
         net_ok = any(r.received > 0 for r in net_res.values())
         dns_ok = home_dns_ok(dns_rows, self.cfg.dns_public)
         web_ok = any(ok for _, _, _, ok in http_rows)
-        state = classify(carrier, gw_ok, net_ok, dns_ok, web_ok)
+        public_ok = any(ok for res, _, _, ok in dns_rows if res in self.cfg.dns_public)
+        state = classify(carrier, gw_ok, net_ok, dns_ok, web_ok, public_ok, home_dns_clean(dns_rows, self.cfg.dns_public))
 
         with self.db.tx() as c:
             c.execute("INSERT OR IGNORE INTO cycles(ts,state,link_ok,gw_ok,net_ok,dns_ok) VALUES(?,?,?,?,?,?)",
@@ -133,6 +151,7 @@ class Monitor:
         self.last_cycle_ts = ts
 
         await self._handle_events(ts, self.tracker.feed(ts, state))
+        await self._handle_degraded(ts, state == DNS_DEG)
         if self.gate.stable(ts, self.tracker.current is not None):
             await self._send(msg.stable_again(self.db.one("SELECT COUNT(*) n FROM incidents WHERE start_ts>=?", (ts - 3600,))["n"]))
         if net_ok:
@@ -148,23 +167,39 @@ class Monitor:
         gw_task = col.ping_host(self.gateway, 5) if self.gateway else asyncio.sleep(0, _failed_ping())
         # Intervalo de 1 s: a 0,2 s varios servidores limitan el ICMP y se medirían pérdidas falsas
         ping_tasks = [col.ping_host(t, 10, interval=1.0) for t in cfg.ping_targets]
-        dns_pairs = [(r, d) for r in self._resolvers() for d in cfg.dns_domains]
-        dns_tasks = [col.dns_query(r, d) for r, d in dns_pairs]
+        # Una tarea por servidor DNS que consulta sus dominios de uno en uno: como mucho 1 consulta a la vez por
+        # servidor (en ráfaga, 15 consultas simultáneas inflaban la latencia medida)
+        dns_tasks = [self._dns_one(r) for r in self._resolvers()]
         http_tasks = [col.http_check(self._http, u) for u in cfg.http_urls]
         results = await asyncio.gather(gw_task, *ping_tasks, *dns_tasks, *http_tasks)
         gw_res = results[0]
         n = len(ping_tasks)
         net = dict(zip(cfg.ping_targets, results[1:1 + n]))
-        dns_res = results[1 + n:1 + n + len(dns_tasks)]
+        dns_rows = [row for rows in results[1 + n:1 + n + len(dns_tasks)] for row in rows]
         http_res = results[1 + n + len(dns_tasks):]
-        dns_rows = [(r, d, ms, ok) for (r, d), (ms, ok) in zip(dns_pairs, dns_res)]
         http_rows = [(u, ms, st, ok) for u, (ms, st, ok) in zip(cfg.http_urls, http_res)]
         return gw_res, net, dns_rows, http_rows
 
+    async def _dns_one(self, resolver: str) -> list[tuple[str, str, float | None, bool]]:
+        rows = []
+        for d in self.cfg.dns_domains:
+            ms, ok = await col.dns_query(resolver, d)
+            rows.append((resolver, d, ms, ok))
+        return rows
+
+    async def _probe_gateway_dns(self) -> None:
+        """Comprueba si el router contesta DNS; si no, no se mide (un 100 % de fallo falso ensucia el informe)."""
+        if self._gw_dns or not self.gateway:
+            return
+        _, ok = await col.dns_query(self.gateway, self.cfg.dns_domains[0])
+        if ok:
+            self._gw_dns = True
+            log.info("El router (%s) sirve DNS: se incluye en las mediciones", self.gateway)
+
     def _resolvers(self) -> list[str]:
-        """DNS del router, DNS que usa realmente el sistema (el del operador) y los públicos, sin repetir."""
+        """DNS del router (si sirve DNS), DNS que usa realmente el sistema (el del operador) y los públicos, sin repetir."""
         out: list[str] = []
-        for r in ([self.gateway] if self.gateway else []) + col.system_dns() + self.cfg.dns_public:
+        for r in ([self.gateway] if self.gateway and self._gw_dns else []) + col.system_dns() + self.cfg.dns_public:
             if r and r not in out:
                 out.append(r)
         return out
@@ -195,6 +230,17 @@ class Monitor:
                 if self.gate.on_end(ts) == AlertGate.SEND:
                     await self._send(msg.outage_end(inc, self.cfg.tz))
 
+    async def _handle_degraded(self, ts: int, degraded: bool) -> None:
+        """DNS de casa caído pero con DNS públicos funcionando: no es caída. Solo se avisa si se prolonga."""
+        ev = self.degrade.feed(ts, degraded)
+        if ev is None:
+            return
+        kind, since = ev
+        if kind == "alert":
+            await self._send(msg.dns_degraded(since, self.cfg.tz))
+        else:
+            await self._send(msg.dns_degraded_end(since, ts, self.cfg.tz))
+
     async def _send(self, text: str) -> None:
         """Envía el aviso si las alertas están activas; si falla (p. ej. sin internet) lo deja en cola."""
         if self.db.get_setting("alerts", "on") != "on":
@@ -216,6 +262,7 @@ class Monitor:
 
     # ------------------------------------------------------------ tareas periódicas
     async def link_job(self) -> None:
+        await self._probe_gateway_dns()
         link = await col.read_link(self.iface)
         sysi = col.read_sysinfo()
         ip = await col.public_ip(self._http)

@@ -88,3 +88,17 @@ def test_pdf_generation_and_figures_match_resumen(db):
     s = stats.summary(db, 7 * 86400, NOW)
     assert s["incidents"] == 1 and s["downtime"] == 600
     assert re.search(r"99\.\d\d %", msg.resumen(s, "7d", TZ))
+
+
+def test_fmt_dt_disambiguates_the_repeated_hour_when_dst_ends():
+    from datetime import datetime, timezone
+    first = int(datetime(2026, 10, 25, 0, 57, 12, tzinfo=timezone.utc).timestamp())      # 02:57 CEST
+    second = first + 570                                                                  # 02:06 CET (misma noche)
+    assert msg.fmt_dt(first, TZ) == "25/10 02:57 CEST"
+    assert msg.fmt_dt(second, TZ) == "25/10 02:06 CET"
+    assert msg.fmt_dt(second, TZ, with_date=False) == "02:06 CET"
+    normal = int(datetime(2026, 10, 22, 11, 0, tzinfo=timezone.utc).timestamp())
+    assert msg.fmt_dt(normal, TZ) == "22/10 13:00"                                        # sin sufijo el resto del año
+    # la tabla de incidentes ya no parece tener el fin antes del inicio
+    inc = [{"start": first, "end": second, "open": False, "duration": 570, "type": "solo_dns"}]
+    assert "02:57 CEST" in msg.caidas(inc, "7d", TZ) and "02:06 CET" in msg.caidas(inc, "7d", TZ)

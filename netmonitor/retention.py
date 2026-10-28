@@ -19,7 +19,7 @@ _SOURCES = {
     "http_ms": "SELECT ts/3600*3600 h, ms v FROM http WHERE ok=1 AND ts<?",
     "speed_down": "SELECT ts/3600*3600 h, down_mbps v FROM speed WHERE ok=1 AND ts<?",
     "speed_up": "SELECT ts/3600*3600 h, up_mbps v FROM speed WHERE ok=1 AND ts<?",
-    "up": "SELECT ts/3600*3600 h, CASE WHEN state='ok' THEN 1.0 ELSE 0.0 END v FROM cycles WHERE ts<?",
+    "up": "SELECT ts/3600*3600 h, CASE WHEN state IN ('ok','dns_degradado') THEN 1.0 ELSE 0.0 END v FROM cycles WHERE ts<?",
     "temp": "SELECT ts/3600*3600 h, temp_c v FROM sysinfo WHERE temp_c IS NOT NULL AND ts<?",
 }
 
